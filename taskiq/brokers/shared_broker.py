@@ -31,6 +31,8 @@ class SharedDecoratedTask(AsyncTaskiqDecoratedTask[_Params, _ReturnType]):
             broker=broker,
             labels=copy(self.labels),
             return_type=self.return_type,
+            is_stream=self.is_stream,
+            item_type=self.item_type,
         )
 
 

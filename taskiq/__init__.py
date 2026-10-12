@@ -9,8 +9,16 @@ from taskiq.abc.formatter import TaskiqFormatter
 from taskiq.abc.middleware import TaskiqMiddleware
 from taskiq.abc.result_backend import AsyncResultBackend
 from taskiq.abc.schedule_source import ScheduleSource
+from taskiq.abc.stream_backend import (
+    AsyncStreamBackend,
+    StreamEvent,
+    StreamEventKind,
+)
 from taskiq.acks import AckableMessage, AcknowledgeType
-from taskiq.brokers.inmemory_broker import InMemoryBroker
+from taskiq.brokers.inmemory_broker import (
+    InMemoryBroker,
+    InmemoryStreamBackend,
+)
 from taskiq.brokers.shared_broker import async_shared_broker
 from taskiq.brokers.zmq_broker import ZeroMQBroker
 from taskiq.context import Context
@@ -21,6 +29,9 @@ from taskiq.exceptions import (
     ResultIsReadyError,
     SecurityError,
     SendTaskError,
+    StreamClosedError,
+    StreamNotFoundError,
+    StreamNotSupportedError,
     TaskiqError,
     TaskiqResultTimeoutError,
 )
@@ -35,6 +46,7 @@ from taskiq.result import TaskiqResult
 from taskiq.scheduler.scheduled_task import ScheduledTask
 from taskiq.scheduler.scheduler import TaskiqScheduler
 from taskiq.state import TaskiqState
+from taskiq.stream import AsyncTaskiqStream, StreamReader
 from taskiq.task import AsyncTaskiqTask
 
 __version__ = version("taskiq")
@@ -44,11 +56,14 @@ __all__ = [
     "AcknowledgeType",
     "AsyncBroker",
     "AsyncResultBackend",
+    "AsyncStreamBackend",
     "AsyncTaskiqDecoratedTask",
+    "AsyncTaskiqStream",
     "AsyncTaskiqTask",
     "BrokerMessage",
     "Context",
     "InMemoryBroker",
+    "InmemoryStreamBackend",
     "NoResultError",
     "PrometheusMiddleware",
     "ResultGetError",
@@ -59,6 +74,12 @@ __all__ = [
     "SendTaskError",
     "SimpleRetryMiddleware",
     "SmartRetryMiddleware",
+    "StreamClosedError",
+    "StreamEvent",
+    "StreamEventKind",
+    "StreamNotFoundError",
+    "StreamNotSupportedError",
+    "StreamReader",
     "TaskiqDepends",
     "TaskiqError",
     "TaskiqEvents",

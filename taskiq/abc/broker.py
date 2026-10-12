@@ -20,6 +20,7 @@ from uuid import uuid4
 
 from taskiq.abc.middleware import TaskiqMiddleware
 from taskiq.abc.serializer import TaskiqSerializer
+from taskiq.abc.stream_backend import AsyncStreamBackend
 from taskiq.acks import AckableMessage
 from taskiq.decor import AsyncTaskiqDecoratedTask
 from taskiq.events import TaskiqEvents
@@ -99,6 +100,9 @@ class AsyncBroker(ABC):
             )
         self.middlewares: list[TaskiqMiddleware] = []
         self.result_backend = result_backend
+        # Backend used by streaming tasks (async generator tasks).
+        # None means streaming tasks are not supported by this broker.
+        self.stream_backend: AsyncStreamBackend[Any] | None = None
         self.decorator_class = AsyncTaskiqDecoratedTask
         self.serializer: TaskiqSerializer = JSONSerializer()
         self.formatter: TaskiqFormatter = ProxyFormatter(self)

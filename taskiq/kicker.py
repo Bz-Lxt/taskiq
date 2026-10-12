@@ -1,4 +1,4 @@
-from collections.abc import Coroutine
+from collections.abc import AsyncGenerator, AsyncIterator, Coroutine
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timedelta
 from logging import getLogger
@@ -16,11 +16,12 @@ from typing import (
 from pydantic import BaseModel
 
 from taskiq.abc.middleware import TaskiqMiddleware
-from taskiq.exceptions import SendTaskError
+from taskiq.exceptions import SendTaskError, StreamNotSupportedError
 from taskiq.labels import prepare_label
 from taskiq.message import TaskiqMessage
 from taskiq.scheduler.created_schedule import CreatedSchedule
 from taskiq.scheduler.scheduled_task import CronSpec, ScheduledTask
+from taskiq.stream import AsyncTaskiqStream
 from taskiq.task import AsyncTaskiqTask
 from taskiq.utils import maybe_awaitable
 
@@ -44,6 +45,8 @@ class AsyncKicker(Generic[_FuncParams, _ReturnType]):
         broker: "AsyncBroker",
         labels: dict[str, Any],
         return_type: type[_ReturnType] | None = None,
+        is_stream: bool = False,
+        item_type: Any = None,
     ) -> None:
         self.task_name = task_name
         self.broker = broker
@@ -51,6 +54,8 @@ class AsyncKicker(Generic[_FuncParams, _ReturnType]):
         self.custom_task_id: str | None = None
         self.custom_schedule_id: str | None = None
         self.return_type = return_type
+        self.is_stream = is_stream
+        self.item_type = item_type
 
     def with_labels(
         self,
@@ -111,6 +116,22 @@ class AsyncKicker(Generic[_FuncParams, _ReturnType]):
         return self
 
     @overload
+    async def kiq(  # type: ignore[overload-overlap]
+        self: "AsyncKicker[_FuncParams, AsyncGenerator[_T, Any]]",
+        *args: _FuncParams.args,
+        **kwargs: _FuncParams.kwargs,
+    ) -> AsyncTaskiqStream[_T]:  # pragma: no cover
+        ...
+
+    @overload
+    async def kiq(  # type: ignore[overload-overlap]
+        self: "AsyncKicker[_FuncParams, AsyncIterator[_T]]",
+        *args: _FuncParams.args,
+        **kwargs: _FuncParams.kwargs,
+    ) -> AsyncTaskiqStream[_T]:  # pragma: no cover
+        ...
+
+    @overload
     async def kiq(
         self: "AsyncKicker[_FuncParams, CoroutineType[Any, Any, _T]]",
         *args: _FuncParams.args,
@@ -158,6 +179,8 @@ class AsyncKicker(Generic[_FuncParams, _ReturnType]):
             args,
             kwargs,
         )
+        if self.is_stream and self.broker.stream_backend is None:
+            raise StreamNotSupportedError(broker=self.broker)
         message = self._prepare_message(*args, **kwargs)
         for middleware in self.broker.middlewares:
             if middleware.__class__.pre_send != TaskiqMiddleware.pre_send:
@@ -171,6 +194,13 @@ class AsyncKicker(Generic[_FuncParams, _ReturnType]):
             if middleware.__class__.post_send != TaskiqMiddleware.post_send:
                 await maybe_awaitable(middleware.post_send(message))
 
+        if self.is_stream:
+            return AsyncTaskiqStream(
+                task_id=message.task_id,
+                result_backend=self.broker.result_backend,
+                stream_backend=self.broker.stream_backend,  # type: ignore[arg-type]
+                item_type=self.item_type,
+            )
         return AsyncTaskiqTask(
             task_id=message.task_id,
             result_backend=self.broker.result_backend,

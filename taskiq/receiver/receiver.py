@@ -20,7 +20,7 @@ from taskiq.abc.broker import AckableMessage, AsyncBroker
 from taskiq.abc.middleware import TaskiqMiddleware
 from taskiq.acks import AckController, AcknowledgeType, parse_acknowledge_type
 from taskiq.context import Context
-from taskiq.exceptions import NoResultError
+from taskiq.exceptions import NoResultError, StreamNotSupportedError
 from taskiq.message import TaskiqMessage
 from taskiq.receiver.params_parser import parse_params
 from taskiq.result import TaskiqResult
@@ -320,50 +320,58 @@ class Receiver:
                 kwargs = await dep_ctx.resolve_kwargs()
             # We update kwargs with kwargs from network.
             kwargs.update(message.kwargs)
-            is_coroutine = True
-            # If the function is a coroutine, we await it.
-            if check_coroutine_func(target):
-                target_future = target(*message.args, **kwargs)
+            if inspect.isasyncgenfunction(target):
+                # Streaming task: publish yielded values while running.
+                await self._iterate_stream(target, message, kwargs)
+                returned = None
             else:
-                is_coroutine = False
-                if self.is_process_pool:
-                    # For ProcessPoolExecutor, we can't use ctx.run because it contains
-                    # a reference to contextvars.Context which cannot be pickled.
-                    # Instead, we call the target function directly in the executor.
-                    # Each worker process starts with its own context, so we don't need
-                    # to preserve the parent context.
-                    target_future = loop.run_in_executor(
-                        self.executor,
-                        _execute_sync_task_in_executor,
-                        target,
-                        tuple(message.args),
-                        kwargs,
-                    )
+                is_coroutine = True
+                # If the function is a coroutine, we await it.
+                if check_coroutine_func(target):
+                    target_future = target(*message.args, **kwargs)
                 else:
-                    # For ThreadPoolExecutor, we can use ctx.run with functools.partial
-                    ctx = contextvars.copy_context()
-                    func = functools.partial(target, *message.args, **kwargs)
-                    target_future = loop.run_in_executor(
-                        self.executor,
-                        ctx.run,
-                        func,
-                    )
-            timeout = message.labels.get("timeout")
-            if timeout is not None:
-                if not is_coroutine:
-                    logger.warning("Timeouts for sync tasks don't work in python well.")
+                    is_coroutine = False
+                    if self.is_process_pool:
+                        # For ProcessPoolExecutor, we can't use ctx.run because it
+                        # contains a reference to contextvars.Context which cannot be
+                        # pickled. Instead, we call the target function directly in
+                        # the executor. Each worker process starts with its own
+                        # context, so we don't need to preserve the parent context.
+                        target_future = loop.run_in_executor(
+                            self.executor,
+                            _execute_sync_task_in_executor,
+                            target,
+                            tuple(message.args),
+                            kwargs,
+                        )
+                    else:
+                        # For ThreadPoolExecutor, we can use ctx.run with
+                        # functools.partial
+                        ctx = contextvars.copy_context()
+                        func = functools.partial(target, *message.args, **kwargs)
+                        target_future = loop.run_in_executor(
+                            self.executor,
+                            ctx.run,
+                            func,
+                        )
+                timeout = message.labels.get("timeout")
+                if timeout is not None:
+                    if not is_coroutine:
+                        logger.warning(
+                            "Timeouts for sync tasks don't work in python well.",
+                        )
 
-                with anyio.fail_after(float(timeout)):
+                    with anyio.fail_after(float(timeout)):
+                        target_future = await target_future
+                        if inspect.isawaitable(target_future):
+                            target_future = await target_future
+
+                else:
                     target_future = await target_future
                     if inspect.isawaitable(target_future):
                         target_future = await target_future
 
-            else:
-                target_future = await target_future
-                if inspect.isawaitable(target_future):
-                    target_future = await target_future
-
-            returned = target_future
+                returned = target_future
         except NoResultError as no_res_exc:
             found_exception = no_res_exc
             logger.warning(
@@ -408,6 +416,58 @@ class Receiver:
                     )
 
         return result
+
+    async def _iterate_stream(
+        self,
+        target: Callable[..., Any],
+        message: TaskiqMessage,
+        kwargs: dict[str, Any],
+    ) -> None:
+        """
+        Drive a streaming task's async generator.
+
+        Yielded values are published to the stream backend with
+        monotonic sequence numbers. On any exception, including
+        execution timeouts, already published values stay readable
+        and the terminal exception is published as the end event.
+        The generator is always closed before this method returns.
+
+        :param target: async generator function to execute.
+        :param message: received message.
+        :param kwargs: resolved keyword arguments.
+
+        :raises StreamNotSupportedError: if broker has no stream backend.
+        """
+        stream_backend = self.broker.stream_backend
+        if stream_backend is None:
+            raise StreamNotSupportedError(broker=self.broker)
+
+        agen = target(*message.args, **kwargs)
+        found_exception: BaseException | None = None
+        try:
+            timeout = message.labels.get("timeout")
+            seq = 0
+            if timeout is not None:
+                with anyio.fail_after(float(timeout)):
+                    async for item in agen:
+                        await stream_backend.add_item(message.task_id, seq, item)
+                        seq += 1
+            else:
+                async for item in agen:
+                    await stream_backend.add_item(message.task_id, seq, item)
+                    seq += 1
+        except BaseException as exc:
+            found_exception = exc
+            raise
+        finally:
+            # Close the generator even if it was cancelled by a timeout
+            # so its finally blocks release resources promptly.
+            with anyio.CancelScope(shield=True):
+                await agen.aclose()
+            await stream_backend.finish_stream(
+                message.task_id,
+                found_exception,
+            )
 
     async def listen(self, finish_event: asyncio.Event) -> None:  # pragma: no cover
         """

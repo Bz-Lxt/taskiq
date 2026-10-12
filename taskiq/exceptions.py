@@ -107,3 +107,27 @@ class TaskBrokerMismatchError(TaskRejectedError):
 
     __template__ = "Task already has a different broker ({broker})"
     broker: Any
+
+
+class StreamNotSupportedError(TaskiqError):
+    """Error if broker doesn't have a stream backend."""
+
+    __template__ = (
+        "Broker {broker} does not support streaming tasks. "
+        "Please configure a stream backend."
+    )
+    broker: Any
+
+
+class StreamNotFoundError(ResultGetError):
+    """Error if there is no stream for the given task id."""
+
+    __template__ = "Cannot find stream for the task, task_id - {task_id}"
+    task_id: str
+
+
+class StreamClosedError(TaskiqError):
+    """Error if stream is force-closed while a reader waits for items."""
+
+    __template__ = "Stream for the task {task_id} was closed"
+    task_id: str

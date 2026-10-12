@@ -1,5 +1,6 @@
+import inspect
 import sys
-from collections.abc import Callable, Coroutine
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Coroutine
 from copy import copy
 from datetime import datetime, timedelta
 from types import CoroutineType
@@ -10,11 +11,13 @@ from typing import (
     ParamSpec,
     TypeVar,
     Union,
+    get_args,
     overload,
 )
 
 from taskiq.kicker import AsyncKicker
 from taskiq.scheduler.created_schedule import CreatedSchedule
+from taskiq.stream import AsyncTaskiqStream
 from taskiq.task import AsyncTaskiqTask
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -56,6 +59,12 @@ class AsyncTaskiqDecoratedTask(Generic[_FuncParams, _ReturnType]):
         self.original_func = original_func
         self.labels = labels
         self.return_type = return_type
+        self.is_stream = inspect.isasyncgenfunction(original_func)
+        self.item_type: Any = None
+        if self.is_stream and return_type is not None:
+            type_args = get_args(return_type)
+            if type_args:
+                self.item_type = type_args[0]
 
         # This is a hack to make ProcessPoolExecutor work
         # with decorated functions.
@@ -96,6 +105,20 @@ class AsyncTaskiqDecoratedTask(Generic[_FuncParams, _ReturnType]):
         **kwargs: _FuncParams.kwargs,
     ) -> _ReturnType:
         return self.original_func(*args, **kwargs)
+
+    @overload
+    async def kiq(  # type: ignore[overload-overlap]
+        self: "AsyncTaskiqDecoratedTask[_FuncParams, AsyncGenerator[_T, Any]]",
+        *args: _FuncParams.args,
+        **kwargs: _FuncParams.kwargs,
+    ) -> AsyncTaskiqStream[_T]: ...
+
+    @overload
+    async def kiq(  # type: ignore[overload-overlap]
+        self: "AsyncTaskiqDecoratedTask[_FuncParams, AsyncIterator[_T]]",
+        *args: _FuncParams.args,
+        **kwargs: _FuncParams.kwargs,
+    ) -> AsyncTaskiqStream[_T]: ...
 
     @overload
     async def kiq(
@@ -228,6 +251,8 @@ class AsyncTaskiqDecoratedTask(Generic[_FuncParams, _ReturnType]):
             broker=self.broker,
             labels=copy(self.labels),
             return_type=self.return_type,
+            is_stream=self.is_stream,
+            item_type=self.item_type,
         )
 
     def __repr__(self) -> str:
